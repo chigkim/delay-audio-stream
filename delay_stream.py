@@ -39,7 +39,7 @@ SAMPLE_RATE = 44100
 CHANNELS = 2
 DTYPE = "float32"   # CoreAudio native; avoids zeros when requesting int16 from iOS devices
 CHUNK_FRAMES = 4096
-DEFAULT_DELAY = 60.0
+DEFAULT_DELAY = 30.0
 
 def _local_ip():
     try:
@@ -119,7 +119,7 @@ def _monitor_callback(outdata, frames, time_info, status):
 def index():
     return render_template_string(
         _HTML,
-        default_delay=int(DEFAULT_DELAY),
+        default_delay=DEFAULT_DELAY,
         sample_rate=SAMPLE_RATE,
         channels=CHANNELS,
     )
@@ -226,25 +226,10 @@ _HTML = """\
     button:active { opacity: 0.85; }
     button.pausing { background: #dc2626; }
     #status { font-size: 0.9rem; color: #666; min-height: 1em; text-align: center; max-width: 300px; }
-    .meter-wrap { display: flex; align-items: center; gap: 0.75rem; }
-    .meter-label { font-size: 0.85rem; color: #666; }
-    #meter {
-      width: 180px; height: 12px;
-      background: #1c1c1c;
-      border-radius: 6px;
-      overflow: hidden;
-    }
-    #meter-bar {
-      height: 100%;
-      width: 0%;
-      background: #22c55e;
-      border-radius: 6px;
-      transition: width 0.08s;
-    }
+    #level { font-size: 1rem; color: #888; font-variant-numeric: tabular-nums; }
     @media (max-width: 400px) {
       h1 { font-size: 1.2rem; }
       input[type=number] { width: 90px; }
-      #meter { width: 140px; }
     }
   </style>
 </head>
@@ -256,10 +241,7 @@ _HTML = """\
            value="{{ default_delay }}">
     <button id="btn" onclick="toggle()">Play</button>
   </div>
-  <div class="meter-wrap">
-    <span class="meter-label">Level</span>
-    <div id="meter"><div id="meter-bar"></div></div>
-  </div>
+  <div id="level" aria-live="off">–</div>
   <div id="status">Press Play to connect.</div>
 
   <script>
@@ -268,11 +250,13 @@ _HTML = """\
     const DEFAULT_DELAY = {{ default_delay }};
 
     let ws = null, audioCtx = null, nextTime = 0, active = false;
+    let lastLevelUpdate = 0;
 
     function toggle() { active ? stop() : start(); }
 
     function start() {
-      const delay = Math.max(0, parseFloat(document.getElementById('delayInput').value) || DEFAULT_DELAY);
+      const raw = parseFloat(document.getElementById('delayInput').value);
+      const delay = Math.max(0, isNaN(raw) ? DEFAULT_DELAY : raw);
       audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE });
       audioCtx.resume();
       nextTime = 0;
@@ -297,16 +281,27 @@ _HTML = """\
         const frames = int16.length / CHANNELS;
         const buf    = audioCtx.createBuffer(CHANNELS, frames, SAMPLE_RATE);
 
-        let peak = 0;
+        let peak = 0, sumSq = 0, totalSamples = 0;
         for (let ch = 0; ch < CHANNELS; ch++) {
           const out = buf.getChannelData(ch);
           for (let i = 0; i < frames; i++) {
             const s = int16[i * CHANNELS + ch] / 32768.0;
             out[i] = s;
             if (Math.abs(s) > peak) peak = Math.abs(s);
+            sumSq += s * s;
+            totalSamples++;
           }
         }
-        document.getElementById('meter-bar').style.width = (peak * 100).toFixed(1) + '%';
+
+        const nowMs = Date.now();
+        if (nowMs - lastLevelUpdate >= 1000) {
+          const peakDb = peak > 0 ? 20 * Math.log10(peak) : -Infinity;
+          const rms = Math.sqrt(sumSq / totalSamples);
+          const rmsDb = rms > 0 ? 20 * Math.log10(rms) : -Infinity;
+          const fmt = db => isFinite(db) ? db.toFixed(1) + ' dB' : '-∞ dB';
+          document.getElementById('level').textContent = 'Peak: ' + fmt(peakDb) + '  RMS: ' + fmt(rmsDb);
+          lastLevelUpdate = nowMs;
+        }
 
         const src = audioCtx.createBufferSource();
         src.buffer = buf;
@@ -317,10 +312,7 @@ _HTML = """\
         src.start(nextTime);
         nextTime += buf.duration;
 
-        if (peak < 0.0001)
-          setStatus('Playing — ' + delay + 's delay. (signal silent — check source)');
-        else
-          setStatus('Playing — ' + delay + 's delay.');
+        setStatus('Playing — ' + delay + 's delay.');
       };
 
       active = true;
@@ -333,6 +325,7 @@ _HTML = """\
       active = false; nextTime = 0;
       setBtn('Play', false);
       setStatus('Stopped.');
+      document.getElementById('level').textContent = '–';
     }
 
     function setBtn(label, isPausing) {
@@ -352,7 +345,7 @@ _HTML = """\
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Stream audio from a device to a browser with a delay.")
-    parser.add_argument("-d", "--delay",        type=float, default=60.0,  help="Default delay in seconds (default: 60)")
+    parser.add_argument("-d", "--delay",        type=float, default=30.0,  help="Default delay in seconds (default: 30)")
     parser.add_argument("-p", "--port",         type=int,   default=8080,  help="Web server port (default: 8080)")
     parser.add_argument("-r", "--rate",         type=int,   default=None,  help="Override sample rate (default: auto-detect)")
     parser.add_argument("-c", "--channels",     type=int,   default=2,     help="Number of channels (default: 2)")
